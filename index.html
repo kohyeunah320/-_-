@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>러브파 분산 곡선</title>
+    <style>
+        body { font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; background: #f5f6fa; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h1 { font-size: 22px; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 0; }
+        .main-layout { display: flex; gap: 25px; margin-top: 20px; }
+        .control-panel { flex: 1; background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e9ecef; min-width: 320px; }
+        .plot-panel { flex: 1.5; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #fff; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; }
+        .slider-group { margin-bottom: 15px; }
+        .slider-group label { display: block; font-size: 14px; font-weight: bold; color: #495057; margin-bottom: 5px; }
+        .slider-wrap { display: flex; align-items: center; gap: 10px; }
+        input[type=range] { flex: 1; accent-color: #3498db; }
+        .val-disp { width: 60px; font-family: monospace; font-size: 14px; text-align: right; background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
+        .error-msg { color: #e74c3c; font-weight: bold; font-size: 14px; margin-top: 15px; display: none; }
+        canvas { border: 1px solid #ddd; background: #fafafa; border-radius: 4px; }
+        .info-box { font-size: 12px; color: #7f8c8d; line-height: 1.5; margin-top: 20px; background: #edf2f7; padding: 10px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>러브파(Love Wave) 분산 동역학 가상 실험실</h1>
+    
+    <div class="main-layout">
+        <!-- 왼쪽 콘트롤 패널 -->
+        <div class="control-panel">
+            <div class="slider-group">
+                <label>1층 두께 (H, m)</label>
+                <div class="slider-wrap">
+                    <input type="range" id="param-H" min="500" max="5000" value="2000" step="100">
+                    <span id="val-H" class="val-disp">2000</span>
+                </div>
+            </div>
+            
+            <div class="slider-group">
+                <label>1층 S파 속도 (β1, m/s)</label>
+                <div class="slider-wrap">
+                    <input type="range" id="param-b1" min="1000" max="2500" value="1800" step="50">
+                    <span id="val-b1" class="val-disp">1800</span>
+                </div>
+            </div>
+            
+            <div class="slider-group">
+                <label>2층 S파 속도 (β2, m/s)</label>
+                <div class="slider-wrap">
+                    <input type="range" id="param-b2" min="2600" max="5000" value="3500" step="50">
+                    <span id="val-b2" class="val-disp">3500</span>
+                </div>
+            </div>
+            
+            <div id="error-box" class="error-msg">❌ 경고: β1은 반드시 β2보다 작아야 합니다!</div>
+            
+            <div class="info-box">
+                <strong>💡 과학 실험 가이드:</strong><br>
+                슬라이더를 움직여보세요! 주파수가 높아질수록 파동이 얕은 1층(β1)을 따라가며 속도가 감소하는 현상을 관찰하세요!
+            </div>
+        </div>
+        
+        <!-- 오른쪽 그래프 패널 -->
+        <div class="plot-panel">
+            <canvas id="plotCanvas" width="550" height="400"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('plotCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // 슬라이더 및 디스플레이 엘리먼트 긁어오기
+    const elH = document.getElementById('param-H');
+    const elb1 = document.getElementById('param-b1');
+    const elb2 = document.getElementById('param-b2');
+    const errBox = document.getElementById('error-box');
+
+    function updateLabels() {
+        document.getElementById('val-H').innerText = elH.value;
+        document.getElementById('val-b1').innerText = elb1.value;
+        document.getElementById('val-b2').innerText = elb2.value;
+    }
+
+    // 러브파 오차 방정식 (자바스크립트 이식 버전)
+    function getError(c, omega, H, b1, b2, mu1, mu2) {
+        let k = omega / c;
+        let arg1 = Math.pow(omega/b1, 2) - Math.pow(k, 2);
+        let arg2 = Math.pow(k, 2) - Math.pow(omega/b2, 2);
+        if(arg1 <= 0 || arg2 <= 0) return 1e9;
+        
+        let kb1 = Math.sqrt(arg1);
+        let kb2 = Math.sqrt(arg2);
+        
+        let lhs = Math.sin(kb1 * H) * (mu1 * kb1);
+        let rhs = Math.cos(kb1 * H) * (mu2 * kb2);
+        return lhs - rhs;
+    }
+
+    // 수치해석으로 각 주파수별 속도 정답 찾기 (이분법 스캔)
+    function solveFrequency(f, H, b1, b2, mu1, mu2) {
+        let omega = 2 * Math.PI * f;
+        let low = b1 + 0.1;
+        let high = b2 - 0.1;
+        
+        // 촘촘하게 스캔하여 부호가 바뀌는(0을 통과하는) 지점 포착
+        let steps = 400;
+        let bestC = b1;
+        let minErr = 1e9;
+        
+        for(let i=0; i<=steps; i++) {
+            let c = low + (high - low) * (i / steps);
+            let err = Math.abs(getError(c, omega, H, b1, b2, mu1, mu2));
+            if(err < minErr) {
+                minErr = err;
+                bestC = c;
+            }
+        }
+        return bestC / 1000; // km/s 단위 변환
+    }
+
+    function drawPlot() {
+        updateLabels();
+        
+        let H = parseFloat(elH.value);
+        let b1 = parseFloat(elb1.value);
+        let b2 = parseFloat(elb2.value);
+        
+        if (b1 >= b2) {
+            errBox.style.display = 'block';
+            return;
+        } else {
+            errBox.style.display = 'none';
+        }
+
+        // 가상의 밀도 설정 및 강성률 계산
+        let rho1 = 2200, rho2 = 2700;
+        let mu1 = rho1 * b1 * b1;
+        let mu2 = rho2 * b2 * b2;
+
+        // 주파수 축 스캔 (0.2Hz ~ 5.0Hz)
+        let freqs = [];
+        let vels = [];
+        for(let f = 0.2; f <= 5.0; f += 0.08) {
+            freqs.push(f);
+            vels.push(solveFrequency(f, H, b1, b2, mu1, mu2));
+        }
+
+        // 캔버스 그리기 초기화
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 여백 및 그래프 영역 설정
+        let padding = 50;
+        let graphW = canvas.width - padding * 2;
+        let graphH = canvas.height - padding * 2;
+
+        // 축 그리기
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, canvas.height - padding);
+        ctx.lineTo(canvas.width - padding, canvas.height - padding);
+        ctx.stroke();
+
+        // 헬퍼: 데이터 좌표를 캔버스 픽셀 좌표로 변환
+        let minF = 0.2, maxF = 5.0;
+        let minV = b1/1000 - 0.2, maxV = b2/1000 + 0.2;
+
+        function getX(f) { return padding + ((f - minF) / (maxF - minF)) * graphW; }
+        function getY(v) { return canvas.height - padding - ((v - minV) / (maxV - minV)) * graphH; }
+
+        // 모눈종이 격자선 그리기
+        ctx.strokeStyle = '#e9ecef';
+        ctx.lineWidth = 1;
+        for(let val = 1; val <= 5; val++) {
+            ctx.beginPath(); ctx.moveTo(getX(val), padding); ctx.lineTo(getX(val), canvas.height - padding); ctx.stroke();
+        }
+        for(let val = Math.ceil(minV); val <= maxV; val++) {
+            ctx.beginPath(); ctx.moveTo(padding, getY(val)); ctx.lineTo(canvas.width - padding, getY(val)); ctx.stroke();
+        }
+
+        // 분산 곡선 선 그리기
+        ctx.strokeStyle = '#3498db';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(getX(freqs[0]), getY(vels[0]));
+        for(let i=1; i<freqs.length; i++) {
+            ctx.lineTo(getX(freqs[i]), getY(vels[i]));
+        }
+        ctx.stroke();
+
+        // 계산 포인트 점 찍기
+        ctx.fillStyle = '#e74c3c';
+        for(let i=0; i<freqs.length; i++) {
+            ctx.beginPath();
+            ctx.arc(getX(freqs[i]), getY(vels[i]), 3, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        // 텍스트 및 라벨링
+        ctx.fillStyle = '#333';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText("Frequency (Hz)", canvas.width/2, canvas.height - 15);
+        
+        ctx.save();
+        ctx.translate(15, canvas.height/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.fillText("Phase Velocity (km/s)", 0, 0);
+        ctx.restore();
+
+        // 단위 눈금 텍스트
+        ctx.textAlign = 'right';
+        ctx.fillText(minV.toFixed(1), padding - 8, getY(minV) + 4);
+        ctx.fillText(maxV.toFixed(1), padding - 8, getY(maxV) + 4);
+        ctx.textAlign = 'center';
+        ctx.fillText(minF.toFixed(1), getX(minF), canvas.height - padding + 15);
+        ctx.fillText(maxF.toFixed(1), getX(maxF), canvas.height - padding + 15);
+    }
+
+    // 슬라이더 조작 시 실시간 인터랙티브 연동 이벤트
+    [elH, elb1, elb2].forEach(item => item.addEventListener('input', drawPlot));
+
+    // 첫 실행
+    drawPlot();
+</script>
+</body>
+</html>
